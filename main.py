@@ -1,61 +1,114 @@
-import cv2
+from machine import Pin, RTC, PWM
 import time
-import numpy as np
-from config import SIZE
-from bg_patterns import BG, SIZE
-from digital_clock import DigitalClock
+import sys
+from app_Wifi import connect_wifi
+import app_RTC
+from app_load_image import load_images
+from app_LED_pico import PicoWS2812Matrix
+import app_LED
 
 
-# --- LEDマトリックス表示 ---
-def show_matrix(led_matrix, prev_time=None, scale=20):
-    img = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
-    for y in range(SIZE):
-        for x in range(SIZE):
-            r, g, b = led_matrix[y][x]
-            img[y, x] = [b, g, r]
-    img = cv2.resize(img, (SIZE*scale, SIZE*scale), interpolation=cv2.INTER_NEAREST)
-    cv2.imshow("LED Clock", img)
+# 起動時に内蔵LEDを光らせる
+print("start")
+pico_led =  Pin("LED", Pin.OUT)
+pico_led.value(1)
 
-    target_frame_time = 0.05
-    now = time.time()
-    if prev_time is None:
-        wait_ms = int(target_frame_time*1000)
-    else:
-        elapsed = now - prev_time
-        wait_ms = max(1, int((target_frame_time - elapsed)*1000))
-    key = cv2.waitKey(wait_ms) & 0xFF
-    quit_flag = key == 27
-    return time.time(), quit_flag
 
-# --- main ---
+# 章仁さんち
+SSID = "ctc-g-23f767"
+PASSWD = "55523cdb20ec3"
+
+# 森島さんち
+# SSID = "ctc-g-072c7c"
+# PASSWD = "6e1fd330fb1cd"
+
+PIN_NUM = 1
+ROWS = 16
+COLS = 16
+leds = PicoWS2812Matrix(pin=PIN_NUM, rows=ROWS, cols=COLS, brightness=0.02)
+
+hex_str = "0000557455445574294400003766455545553755000000000000000000000000"
+app_LED.draw_hex(leds, hex_str, color1=(128, 64, 255))
+leds.show()
+
+connect_wifi(SSID, PASSWD)
+
+hex_str = "000055745544557429440000376645554555375500001E481250126012501E48"
+app_LED.draw_hex(leds, hex_str, color1=(0, 0, 255))
+leds.show()
+
+app_RTC.sync_time(tz_offset_hours=9)
+print(RTC().datetime() )
+
+images = load_images("anim.txt", ROWS, COLS, 3)
+
 def main():
-    bg = BG(SIZE)
-    bg.init_bg()  # 初期背景
-    clock = DigitalClock()
-    prev_time = time.localtime()
+    # 外周を1周する時間（秒）
+    cycle_time = 1
+    # フレームごとの目標待機時間（秒）
+    frame_delay = 0.1
 
-    while True:
-        t = time.localtime()
-        # 秒0で背景切替
-        if t.tm_sec == 0 and prev_time.tm_sec != 0:
-            bg.init_bg()
+    # 外周LED数
+    rows, cols = leds.rows, leds.cols
+    n = 2*(rows + cols) - 4
 
-        # 背景描画
-        led_matrix = bg.draw()
+    # 初期化
+    offset_hue = 0.0
 
-        # 時計描画
-        hh = f"{t.tm_hour:02d}"
-        mm = f"{t.tm_min:02d}"
-        ss = f"{t.tm_sec:02d}"
-        clock.draw(led_matrix, hh, mm, ss, [255,255,255])
+    # MicroPython 用の時間計測（ticks_ms を使用）
+    last_ticks = time.ticks_ms()
 
-        # 表示
-        prev_time_now, quit_flag = show_matrix(led_matrix, None)
-        if quit_flag:
-            break
-        prev_time = t
+    image_interval = 0.2   # 画像切替間隔（秒）
+    last_image_time = time.ticks_ms()
+    image_index = 0
 
-    cv2.destroyAllWindows()
+    try:
+        while True:
+            loop_start = time.ticks_ms()
+            dt_ms = time.ticks_diff(loop_start, last_ticks)
+            last_ticks = loop_start
+
+            current_time = time.localtime()
+            minute = current_time[4]
+            second = current_time[5]
+            mode = (minute // 10) % 3
+
+            if mode == 0:
+
+                # 実際に経過した時間を使って hue を進める
+                offset_hue = (offset_hue + 0.360 * dt_ms / cycle_time) % 360.0
+
+                app_LED.draw_clock(leds, current_time)
+                app_LED.border_rainbow(leds, offset_hue)
+                r, c = leds.outer_coords[second]
+                leds.matrix[r][c] = (255,255,255)
+
+            elif mode == 1 or mode == 2:
+                if time.ticks_diff(loop_start, last_image_time) > int(image_interval * 1000):
+                    image_index = (image_index + 1) % len(images)
+                    src = images[image_index]
+                    for y in range(leds.rows):
+                        for x in range(leds.cols):
+                            leds.matrix[y][x] = src[y][x]
+                    last_image_time = loop_start
+
+            elif mode == 2:
+                pass
+
+            leds.show()
+
+            # 描画にかかった時間を考慮してスリープ（目標 frame_delay を維持）
+            elapsed_ms = time.ticks_diff(time.ticks_ms(), loop_start)
+            to_sleep_ms = int(frame_delay * 1000 - elapsed_ms)
+            if to_sleep_ms > 0:
+                time.sleep_ms(to_sleep_ms)
+            # 処理が遅ければスリープしない（次ループで dt が大きくなるため速度は補正される）
+
+    except KeyboardInterrupt:
+        leds.close()
+
+    finally:
+        leds.close()
 
 if __name__ == "__main__":
     main()
